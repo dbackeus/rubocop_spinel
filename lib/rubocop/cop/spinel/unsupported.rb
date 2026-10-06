@@ -4,6 +4,7 @@ module RuboCop
   module Cop
     module Spinel
       class Unsupported < Base
+        extend AutoCorrector
         include Support
 
         # refused whatever the receiver
@@ -31,6 +32,13 @@ module RuboCop
         TIME_PARSERS = %i[httpdate iso8601 parse rfc2822 rfc822 strptime xmlschema].freeze
         # packages whose functions are native, so they have no Method object
         NATIVE_FUNCTION_MODULES = %i[Base64 Digest JSON].freeze
+        # iterators yielding one value, so `&mod.method(:f)` and `{ mod.f(it) }` are the same
+        ONE_VALUE_ITERATORS = %i[
+          all? any? collect collect! collect_concat count detect drop_while each each_entry each_key each_value
+          filter filter! filter_map find find_all find_index flat_map group_by map map! max_by min_by none? one?
+          partition reject reject! select select! sort_by sort_by! sum take_while to_h transform_keys
+          transform_values uniq uniq!
+        ].freeze
         RESTRICT_ON_SEND = (
           ANY_RECEIVER + KERNEL + DECLARATIONS + EVALS + LITERAL_NAMES + SENDS + METHOD_LISTS + TOP_LEVEL_REFLECTION + TIME_PARSERS +
           %i[class_exec define_singleton_method extend method module_exec new popen refine require singleton_class slice_after slice_before using]
@@ -58,7 +66,7 @@ module RuboCop
 
         def on_send(node)
           message = message_for(node)
-          flag(node, message) if message
+          flag(node, message) { correct_call(_1, node) } if message
         end
         alias_method :on_csend, :on_send
 
@@ -75,7 +83,9 @@ module RuboCop
         end
 
         def on_if(node)
-          flag(node.condition, CONSTANT_CONDITION) if constant_assignment?(node.condition)
+          return unless constant_assignment?(node.condition)
+
+          flag(node.condition, CONSTANT_CONDITION) { hoist_constant(_1, node) }
         end
 
         def on_while(node)
@@ -257,9 +267,80 @@ module RuboCop
         end
 
         # `if (CONFIG = load)`, `while (LINE = gets)`
-        def constant_assignment?(condition)
-          condition = condition.children.first while condition&.begin_type? && condition.children.one?
-          condition&.casgn_type?
+        def constant_assignment?(condition) = unparenthesized(condition)&.casgn_type?
+
+        def correct_call(corrector, node)
+          return unless direct?(node)
+
+          case node.method_name
+          when :method then native_method_block(corrector, node)
+          when :slice_after, :slice_before then proc_arg_block(corrector, node)
+          end
+        end
+
+        # `list.map(&Base64.method(:strict_decode64))` -> `list.map { Base64.strict_decode64(it) }`
+        def native_method_block(corrector, node)
+          pass = node.parent
+          return unless pass&.block_pass_type? && pass.parent&.call_type? && ONE_VALUE_ITERATORS.include?(pass.parent.method_name)
+
+          name = node.first_argument.value.to_s
+          param = block_param(node)
+          return unless param && name.match?(/\A[a-z_]\w*[?!]?\z/)
+
+          corrector.replace(*block_edit(pass, "{ #{node.receiver.source}.#{name}(#{param}) }"))
+        end
+
+        # `it` from Ruby 3.4, else `_1`, which cannot nest in another numbered-parameter block
+        def block_param(node)
+          return "it" if target_ruby_version >= 3.4
+
+          "_1" unless node.each_ancestor(:numblock).any?
+        end
+
+        # `slice_before(->(x) { x.even? })` -> `slice_before { |x| x.even? }`
+        def proc_arg_block(corrector, node)
+          lambda = node.first_argument
+          return unless node.arguments.one? && lambda.type?(:block, :numblock, :itblock) && lambda.lambda_or_proc?
+          # `return` / `break` leave a block differently, and a block splats an array over several params
+          return if lambda.body&.each_node(:return, :break)&.any? || lambda.argument_list.size > 1
+
+          corrector.replace(*block_edit(lambda, block_literal(lambda)))
+        end
+
+        # a lambda or proc as a brace block: `->(x) { x }` / `lambda do |x| x end` -> `{ |x| x }`
+        # (braces, since a `do` block would bind to an outer call without parens)
+        def block_literal(lambda)
+          stabby = lambda.send_node.lambda_literal? && lambda.block_type?
+          params = stabby ? lambda.argument_list.map(&:source).join(", ") : ""
+          inner = lambda.loc.begin.end.join(lambda.loc.end.begin).source
+          "{#{" |#{params}|" unless params.empty?}#{inner}}"
+        end
+
+        # the edit turning a call's last argument into a block: `f(a, &b)` -> `f(a) { ... }`
+        def block_edit(arg, block)
+          call = arg.parent
+          kept = call.arguments.take_while { !_1.equal?(arg) }
+          args = kept.empty? ? "" : "(#{kept.first.source_range.join(kept.last.source_range).source})"
+          finish = call.parenthesized? ? call.loc.end : arg.source_range
+          [call.loc.selector.end.join(finish), "#{args} #{block}"]
+        end
+
+        # `if (CONFIG = load)` -> `CONFIG = load` ahead of `if CONFIG`
+        def hoist_constant(corrector, node)
+          return unless statement?(node)
+
+          assignment = unparenthesized(node.condition)
+          corrector.replace(node.condition, assignment.source_range.begin.join(assignment.loc.name).source)
+          corrector.insert_before(node, "#{assignment.source}\n#{" " * node.source_range.column}")
+        end
+
+        # an `if` that starts its own statement, so code can move ahead of it unchanged
+        def statement?(node)
+          parent = node.parent
+          return false if node.elsif?
+          return true if parent.nil? || parent.type?(:begin, :kwbegin)
+
+          parent.type?(:def, :defs, :block, :numblock, :itblock, :class, :module, :sclass) && parent.body.equal?(node)
         end
 
         # `singleton_class.attr_accessor :x` in a class body is a declaration, not an object
@@ -424,6 +505,12 @@ module RuboCop
 
         def subclass_message(node)
           "Spinel does not support subclassing `#{node.short_name}`; wrap it in an instance variable."
+        end
+
+        # `((x))` -> `x`
+        def unparenthesized(node)
+          node = node.children.first while node&.begin_type? && node.children.one?
+          node
         end
 
         # one-liners

@@ -392,6 +392,84 @@ class TestUnsupportedCop < CopTest
     RUBY
   end
 
+  def test_autocorrects_native_method_objects_to_blocks
+    target_ruby(3.4)
+    assert_equal <<~RUBY, autocorrect(<<~RUBY)
+      env.transform_values { Base64.strict_decode64(it) }
+      lines.map { JSON.parse(it) }
+      sizes.sum(0) { Digest::SHA256.hexdigest(it) }
+    RUBY
+      env.transform_values(&Base64.method(:strict_decode64))
+      lines.map &JSON.method(:parse)
+      sizes.sum(0, &Digest::SHA256.method(:hexdigest))
+    RUBY
+    target_ruby(3.3)
+    assert_equal "lines.map { JSON.parse(_1) }\n", autocorrect("lines.map(&JSON.method(:parse))\n")
+  end
+
+  def test_leaves_native_method_objects_without_a_safe_block
+    source = <<~RUBY
+      pairs.inject(&JSON.method(:generate))
+      parse = JSON.method(:parse)
+      rows.each { _1.map(&JSON.method(:parse)) }
+    RUBY
+    target_ruby(3.3)
+    assert_equal source, autocorrect(source)
+  end
+
+  def test_autocorrects_proc_patterns_to_blocks
+    assert_equal <<~RUBY, autocorrect(<<~RUBY)
+      list.slice_before { |x| x.even? }
+      list.slice_after { |x| x > 1 }
+      p list.slice_before { |line|
+        line.start_with?("#")
+      }
+    RUBY
+      list.slice_before(->(x) { x.even? })
+      list.slice_after(lambda { |x| x > 1 })
+      p list.slice_before(->(line) do
+        line.start_with?("#")
+      end)
+    RUBY
+    source = <<~RUBY
+      list.slice_before(->(x) { return true if x.nil?; x.even? })
+      list.slice_before(heading)
+      heading = ->(x) { x.even? }
+    RUBY
+    assert_equal source, autocorrect(source)
+  end
+
+  def test_autocorrects_constant_assignment_in_conditions
+    assert_equal <<~RUBY, autocorrect(<<~RUBY)
+      CONTEXT = CONFIG["contexts"][NAME]
+      if CONTEXT
+        puts CONTEXT
+      end
+      module Limits
+        LIMIT = ENV["LIMIT"]
+        puts LIMIT unless LIMIT
+      end
+      X = x
+      X ? X : 0
+    RUBY
+      if (CONTEXT = CONFIG["contexts"][NAME])
+        puts CONTEXT
+      end
+      module Limits
+        puts LIMIT unless (LIMIT = ENV["LIMIT"])
+      end
+      (X = x) ? X : 0
+    RUBY
+    source = <<~RUBY
+      if a
+      elsif (B = b)
+      end
+      while (LINE = gets); end
+      puts(if (C = c) then C end)
+    RUBY
+    assert_equal source, autocorrect(source)
+  end
+
   private
 
   def cop_class = RuboCop::Cop::Spinel::Unsupported

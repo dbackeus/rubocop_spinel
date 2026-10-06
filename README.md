@@ -54,8 +54,11 @@ sample.rb:8:5: C: Spinel/Divergence: Spinel freezes string literals; start from 
 - `require` of stdlib that Spinel does not ship (`date`, `yaml`, `timeout`, ... see `UnsupportedRequires`), and `DidYouMean`, which CRuby loads without one
 - `private_methods` / `protected_methods`, and receiverless `methods` / `respond_to?` at the top level
 - `Time.parse`, `Time.iso8601`, `Time.strptime` and friends, which compile after `require "time"` but are missing
-- a Method of a native package function, like `&Base64.method(:strict_decode64)`
-- assigning a constant in a condition (`if (CONFIG = load)`)
+- a Method of a native package function, like `&Base64.method(:strict_decode64)` (autocorrected)
+- `slice_before` / `slice_after` with a Proc (autocorrected)
+- assigning a constant in a condition (`if (CONFIG = load)`) (autocorrected)
+
+`rubocop -a` rewrites those three where the result behaves the same on CRuby: `{ Base64.strict_decode64(it) }` for a single-value iterator (`_1` below Ruby 3.4), a brace block for a lambda without `return` / `break`, and the assignment moved ahead of an `if` that is its own statement.
 
 **Spinel/Divergence**
 
@@ -104,6 +107,7 @@ Spinel/Divergence:
 - flag `__dir__` / `__FILE__` paths and `Interrupt` rescues without an INT trap
 - `AllowedRequires` and `InterruptRequires` settings for features a project provides itself
 - new `Spinel/SystemLibrary` cop (disabled by default) for `require "openssl"`
+- autocorrect native Method objects, Proc patterns and constant assignment in conditions
 
 #### 0.2.0 (May '26)
 

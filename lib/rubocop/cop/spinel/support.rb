@@ -15,8 +15,8 @@ module RuboCop
 
         # Spinel drops a branch that a `RUBY_ENGINE == "..."` check rules out, so
         # code kept there for other engines never reaches the compiler.
-        def flag(node, message)
-          add_offense(highlight(node), message:) unless dropped_by_spinel?(node)
+        def flag(node, message, &)
+          add_offense(highlight(node), message:, &) unless dropped_by_spinel?(node)
         end
 
         # the method name of a call or def, the header of `class << x`
