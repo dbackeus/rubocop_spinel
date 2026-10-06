@@ -1,5 +1,48 @@
 ---
+Spinel/Divergence:
+  Description: Flag Ruby that Spinel compiles but runs differently from CRuby.
+  Enabled: true
+  VersionAdded: "0.3.0"
+
 Spinel/Unsupported:
-  Description: Ban Ruby features unsupported by Spinel.
+  Description: Flag Ruby that Spinel refuses to compile or cannot run.
   Enabled: true
   VersionAdded: "0.1.0"
+  VersionChanged: "0.3.0"
+  # stdlib that `require` cannot load under Spinel (`spin build` refuses it)
+  UnsupportedRequires:
+    - abbrev
+    - continuation
+    - coverage
+    - date
+    - delegate
+    - English
+    - etc
+    - fcntl
+    - find
+    - getoptlong
+    - io/nonblock
+    - io/wait
+    - ipaddr
+    - matrix
+    - mutex_m
+    - objspace
+    - observer
+    - open-uri
+    - pp
+    - prettyprint
+    - prime
+    - pstore
+    - psych
+    - racc
+    - rbconfig
+    - readline
+    - reline
+    - resolv
+    - ripper
+    - shellwords
+    - singleton
+    - timeout
+    - tsort
+    - weakref
+    - yaml
