@@ -24,9 +24,16 @@ module RuboCop
         BINDING_LOCALS = %i[local_variable_defined? local_variable_get].freeze
         HOOKS = %i[extended included inherited prepended].freeze
         SENDS = %i[__send__ public_send send].freeze
+        # method lists Spinel cannot build: on any receiver, or receiverless at the top level
+        METHOD_LISTS = %i[private_methods protected_methods].freeze
+        TOP_LEVEL_REFLECTION = %i[methods public_methods respond_to?].freeze
+        # `require "time"` compiles, but these class methods are missing
+        TIME_PARSERS = %i[httpdate iso8601 parse rfc2822 rfc822 strptime xmlschema].freeze
+        # packages whose functions are native, so they have no Method object
+        NATIVE_FUNCTION_MODULES = %i[Base64 Digest JSON].freeze
         RESTRICT_ON_SEND = (
-          ANY_RECEIVER + KERNEL + DECLARATIONS + EVALS + LITERAL_NAMES + SENDS +
-          %i[class_exec define_singleton_method extend module_exec new popen refine require singleton_class slice_after slice_before using]
+          ANY_RECEIVER + KERNEL + DECLARATIONS + EVALS + LITERAL_NAMES + SENDS + METHOD_LISTS + TOP_LEVEL_REFLECTION + TIME_PARSERS +
+          %i[class_exec define_singleton_method extend method module_exec new popen refine require singleton_class slice_after slice_before using]
         ).uniq.freeze
 
         BUILTIN_CLASSES = %i[
@@ -40,6 +47,7 @@ module RuboCop
         # ObjectSpace calls that need no allocation registry
         OBJECT_SPACE_OK = %i[const_defined? define_finalizer undefine_finalizer].freeze
 
+        CONSTANT_CONDITION = "Spinel does not support assigning a constant in a condition; assign it first."
         MESSAGES = {
           binding: "Spinel only supports `binding.local_variable_get(:name)` and friends.",
           compare_by_identity: "Spinel does not support `compare_by_identity`; key by an explicit id.",
@@ -59,11 +67,23 @@ module RuboCop
 
           message = case node.short_name
           when :DATA then "Spinel does not support `DATA` / `__END__`." unless user_class?(:DATA)
+          when :DidYouMean then did_you_mean_message
           when :ObjectSpace then "Spinel does not support `ObjectSpace` (except `define_finalizer`)." if object_space_use?(node)
           when :TracePoint then unsupported(:TracePoint)
           end
           flag(node, message) if message
         end
+
+        def on_if(node)
+          flag(node.condition, CONSTANT_CONDITION) if constant_assignment?(node.condition)
+        end
+
+        def on_while(node)
+          flag(node.condition, CONSTANT_CONDITION) if constant_assignment?(node.condition)
+        end
+        alias_method :on_until, :on_while
+        alias_method :on_while_post, :on_while
+        alias_method :on_until_post, :on_while
 
         def on_class(node)
           name = node.identifier.short_name
@@ -94,7 +114,11 @@ module RuboCop
 
         def message_for(node)
           name = call_name(node)
+          return time_parser_message(name) if TIME_PARSERS.include?(name) && builtin_receiver?(node, :Time)
+          return native_method_message(node) if name == :method && native_function_module?(node.receiver)
           return if user_method?(name) && !%i[new require].include?(name)
+          return method_list_message(name) if METHOD_LISTS.include?(name)
+          return top_level_reflection_message(node, name) if TOP_LEVEL_REFLECTION.include?(name)
           return unsupported(name) if ANY_RECEIVER.include?(name)
           return kernel_message(node, name) if KERNEL.include?(name)
           return "Spinel only supports `#{name}` in the class body, not on a receiver." if DECLARATIONS.include?(name) && foreign_receiver?(node)
@@ -181,7 +205,61 @@ module RuboCop
           return unless node.receiver.nil? || const_receiver?(node, :Kernel)
 
           feature = node.first_argument
-          "Spinel does not provide `require \"#{feature.value}\"`." if feature&.str_type? && cop_config.fetch("UnsupportedRequires", []).include?(feature.value)
+          "Spinel does not provide `require \"#{feature.value}\"`." if feature&.str_type? && unsupported_require?(feature.value)
+        end
+
+        # `AllowedRequires` names features the project provides itself, eg. as spin packages
+        def unsupported_require?(feature)
+          cop_config.fetch("UnsupportedRequires", []).include?(feature) && !cop_config.fetch("AllowedRequires", []).include?(feature)
+        end
+
+        # CRuby loads did_you_mean at boot, so no `require` gives its absence away
+        def did_you_mean_message
+          return if user_class?(:DidYouMean) || required?("did_you_mean")
+
+          "Spinel does not provide `DidYouMean`, which CRuby loads at boot."
+        end
+
+        def method_list_message(name)
+          "Spinel does not support `#{name}`; list the methods explicitly."
+        end
+
+        # `methods` and `respond_to?(name)` work on an object, and `self.respond_to?` at the top level
+        def top_level_reflection_message(node, name)
+          return if node.receiver || node.each_ancestor(:def, :defs, :class, :module, :sclass).any?
+          return if node.each_ancestor(:block).any? { class_body?(_1) || %i[instance_eval instance_exec].include?(_1.send_node.method_name) }
+
+          "Spinel does not support a receiverless `#{name}` at the top level."
+        end
+
+        def time_parser_message(name)
+          "Spinel does not provide `Time.#{name}`; build the Time from its parts, eg. with `Time.at` or `Time.new`."
+        end
+
+        def native_method_message(node)
+          return unless node.first_argument&.type?(:sym, :str)
+
+          "Spinel cannot make a Method of the native `#{node.receiver.source}.#{node.first_argument.value}`; call it in a block."
+        end
+
+        # `Base64`, `JSON`, `Digest::SHA256`, unless the program defines its own
+        def native_function_module?(recv)
+          return false unless recv&.const_type?
+
+          root = recv
+          root = root.namespace while root.namespace&.const_type?
+          NATIVE_FUNCTION_MODULES.include?(root.short_name) && top_level?(root) && !user_class?(root.short_name)
+        end
+
+        # `Time.parse`, unless the program defines its own Time
+        def builtin_receiver?(node, name)
+          const_receiver?(node, name) && top_level?(node.receiver) && !user_class?(name)
+        end
+
+        # `if (CONFIG = load)`, `while (LINE = gets)`
+        def constant_assignment?(condition)
+          condition = condition.children.first while condition&.begin_type? && condition.children.one?
+          condition&.casgn_type?
         end
 
         # `singleton_class.attr_accessor :x` in a class body is a declaration, not an object

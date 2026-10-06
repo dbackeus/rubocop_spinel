@@ -19,4 +19,10 @@ class CopTest < Minitest::Test
       YAML.load_file(File.expand_path("../config/default.yml", __dir__)).merge("AllCops" => {"TargetRubyVersion" => 3.3})
     )
   end
+
+  # overrides settings of the cop under test, eg. `configure("AllowedRequires" => ["yaml"])`
+  def configure(settings)
+    name = cop_class.cop_name
+    @config = RuboCop::Config.new(config.to_h.merge(name => config.for_cop(name).merge(settings)))
+  end
 end

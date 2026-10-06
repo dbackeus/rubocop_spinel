@@ -87,6 +87,11 @@ module RuboCop
           assigns + or_assigns.map(&:expression)
         end
 
+        # `require "feature"` anywhere in the file, in any branch
+        def required?(feature)
+          processed_source.ast.each_node(:send).any? { _1.method?(:require) && _1.receiver.nil? && _1.first_argument&.str_type? && _1.first_argument.value == feature }
+        end
+
         # a program that defines (or aliases) the name itself is calling its own method
         def user_method?(name)
           @user_methods ||= begin
@@ -110,6 +115,7 @@ module RuboCop
         # one-liners
 
         def branch(node, truthy) = node.children[truthy ? 1 : 2] # raw: `unless` is not swapped
+        def const_named?(node, name) = node&.const_type? && node.short_name == name
         def top_level?(node) = node.namespace.nil? || node.namespace.cbase_type?
       end
     end

@@ -277,6 +277,121 @@ class TestUnsupportedCop < CopTest
     RUBY
   end
 
+  def test_allowed_requires
+    configure("AllowedRequires" => %w[yaml did_you_mean])
+    assert_equal ["Spinel does not provide `require \"date\"`."], messages(<<~RUBY)
+      require "date"
+      require "yaml"
+      require "did_you_mean"
+    RUBY
+  end
+
+  def test_flags_did_you_mean
+    assert_equal ["Spinel does not provide `DidYouMean`, which CRuby loads at boot."], messages(<<~RUBY)
+      DidYouMean::SpellChecker.new(dictionary: names).correct(name)
+    RUBY
+    # requiring it moves the question to the require, which AllowedRequires answers
+    assert_equal ["Spinel does not provide `require \"did_you_mean\"`."], messages(<<~RUBY)
+      require "did_you_mean" if RUBY_ENGINE == "spinel"
+      DidYouMean::SpellChecker.new(dictionary: names).correct(name)
+    RUBY
+    assert_empty messages(<<~RUBY)
+      module DidYouMean; end
+      DidYouMean::SpellChecker
+    RUBY
+  end
+
+  def test_flags_method_lists
+    assert_equal [
+      "Spinel does not support `private_methods`; list the methods explicitly.",
+      "Spinel does not support `protected_methods`; list the methods explicitly.",
+      "Spinel does not support a receiverless `methods` at the top level.",
+      "Spinel does not support a receiverless `public_methods` at the top level.",
+      "Spinel does not support a receiverless `respond_to?` at the top level.",
+      "Spinel does not support a receiverless `respond_to?` at the top level.",
+    ], messages(<<~RUBY)
+      COMMANDS = private_methods - Object.private_instance_methods
+      obj.protected_methods
+      methods.grep(/^cmd_/)
+      public_methods
+      send(name) if respond_to?(name, true)
+      names.each { |name| puts name if respond_to?(name) }
+    RUBY
+    assert_empty messages(<<~RUBY)
+      obj.methods
+      obj.public_methods(false)
+      Foo.instance_methods(false)
+      Foo.private_instance_methods(false)
+      Foo.singleton_methods
+      self.respond_to?(:x)
+      1.respond_to?(:succ, true)
+      class Foo
+        def has?(name) = respond_to?(name)
+        def list = methods
+      end
+    RUBY
+  end
+
+  def test_flags_time_parsing
+    assert_equal [
+      "Spinel does not provide `Time.parse`; build the Time from its parts, eg. with `Time.at` or `Time.new`.",
+      "Spinel does not provide `Time.iso8601`; build the Time from its parts, eg. with `Time.at` or `Time.new`.",
+      "Spinel does not provide `Time.strptime`; build the Time from its parts, eg. with `Time.at` or `Time.new`.",
+    ], messages(<<~RUBY)
+      require "time"
+      Time.parse(line)
+      ::Time.iso8601(stamp)
+      Time.strptime(date, "%Y-%m-%d")
+    RUBY
+    assert_empty messages(<<~RUBY)
+      Time.now.iso8601
+      Time.at(stamp.to_i)
+      Date.parse(line)
+      JSON.parse(body)
+    RUBY
+  end
+
+  def test_flags_method_objects_of_native_functions
+    assert_equal [
+      "Spinel cannot make a Method of the native `Base64.strict_decode64`; call it in a block.",
+      "Spinel cannot make a Method of the native `JSON.parse`; call it in a block.",
+      "Spinel cannot make a Method of the native `Digest::SHA256.hexdigest`; call it in a block.",
+    ], messages(<<~RUBY)
+      env.transform_values(&Base64.method(:strict_decode64))
+      lines.map(&JSON.method(:parse))
+      Digest::SHA256.method(:hexdigest)
+    RUBY
+    assert_empty messages(<<~RUBY)
+      env.transform_values { |value| Base64.strict_decode64(value) }
+      lines.map(&URI.method(:parse))
+      names.map(&method(:shout))
+    RUBY
+  end
+
+  def test_flags_constant_assignment_in_conditions
+    message = "Spinel does not support assigning a constant in a condition; assign it first."
+    assert_equal [message] * 5, messages(<<~RUBY)
+      if (CONTEXT = CONFIG["contexts"][NAME])
+        puts CONTEXT
+      end
+      puts CONTEXT unless (CONTEXT = CONFIG["context"])
+      if a
+      elsif (B = b)
+      end
+      while (LINE = gets); end
+      (X = x) ? X : 0
+    RUBY
+    assert_empty messages(<<~RUBY)
+      CONTEXT = CONFIG["contexts"][NAME]
+      if CONTEXT
+        puts CONTEXT
+      end
+      if (value = env["value"])
+        puts value
+      end
+    RUBY
+  end
+
   private
 
   def cop_class = RuboCop::Cop::Spinel::Unsupported

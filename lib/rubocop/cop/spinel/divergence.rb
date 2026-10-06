@@ -18,9 +18,13 @@ module RuboCop
         ].freeze
         TRACES = %i[backtrace backtrace_locations caller caller_locations].freeze
         UNCALLED = %i[method_missing respond_to_missing?].freeze
-        RESTRICT_ON_SEND = (ENCODING_CALLS + GRAPHEMES + MUTATORS + TRACES).uniq.freeze
+        # exceptions a Ctrl-C raises in CRuby, while it kills a Spinel program outright
+        INTERRUPTS = %i[Interrupt SignalException].freeze
+        INT_SIGNALS = ["INT", "SIGINT", 2].freeze
+        RESTRICT_ON_SEND = (ENCODING_CALLS + GRAPHEMES + MUTATORS + TRACES + %i[__dir__]).uniq.freeze
 
         def on_new_investigation
+          @traps_int = nil
           super
           comment = processed_source.comments.find { MagicComment.parse(_1.text).frozen_string_literal == false }
           add_offense(comment, message: "Spinel ignores `frozen_string_literal: false`; literals are always frozen.") if comment
@@ -42,6 +46,22 @@ module RuboCop
           flag(node, message) if message
         end
         alias_method :on_defs, :on_def
+
+        def on_str(node)
+          return unless node.source == "__FILE__" && !program_name_check?(node)
+
+          flag(node, "Spinel resolves `__FILE__` at compile time, to the source file rather than the executable; use `$0`.")
+        end
+
+        def on_resbody(node)
+          return if traps_int?
+
+          node.exceptions.each do |exception|
+            next unless exception.const_type? && INTERRUPTS.include?(exception.short_name) && top_level?(exception)
+
+            flag(exception, "Spinel does not raise `#{exception.short_name}` on Ctrl-C; trap it with `Signal.trap(\"INT\") { raise Interrupt }`.")
+          end
+        end
 
         def on_defined?(node)
           return unless node.children.first&.type?(:super, :zsuper)
@@ -67,7 +87,35 @@ module RuboCop
             "Spinel strings are UTF-8 or binary only."
           elsif GRAPHEMES.include?(name)
             "Spinel's `#{name}` does not join combining characters."
+          elsif name == :__dir__ && node.receiver.nil? && !user_method?(name)
+            "Spinel resolves `__dir__` at compile time, not to the executable's directory; locate files from `$0`."
           end
+        end
+
+        # `__FILE__ == $0`, which Spinel answers for the executable
+        def program_name_check?(node)
+          parent = node.parent
+          return false unless parent&.send_type? && %i[== !=].include?(parent.method_name)
+
+          other = parent.receiver.equal?(node) ? parent.first_argument : parent.receiver
+          other&.gvar_type? && %i[$0 $PROGRAM_NAME].include?(other.name)
+        end
+
+        # `Signal.trap("INT") { raise Interrupt }` anywhere in the file, or a require of a feature doing so
+        def traps_int?
+          if @traps_int.nil?
+            @traps_int = processed_source.ast.each_node(:send).any? { int_trap?(_1) } ||
+              cop_config.fetch("InterruptRequires", []).any? { required?(_1) }
+          end
+          @traps_int
+        end
+
+        def int_trap?(node)
+          return false unless node.method?(:trap)
+          return false unless node.receiver.nil? || const_named?(node.receiver, :Signal)
+
+          signal = node.first_argument
+          signal&.type?(:str, :sym, :int) && INT_SIGNALS.include?(signal.sym_type? ? signal.value.to_s : signal.value)
         end
 
         # a string literal, or a local/ivar only ever set to one

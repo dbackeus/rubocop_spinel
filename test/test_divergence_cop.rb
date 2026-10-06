@@ -109,6 +109,65 @@ class TestDivergenceCop < CopTest
     RUBY
   end
 
+  def test_flags_source_locations
+    assert_equal [
+      "Spinel resolves `__dir__` at compile time, not to the executable's directory; locate files from `$0`.",
+      "Spinel resolves `__FILE__` at compile time, to the source file rather than the executable; use `$0`.",
+    ], messages(<<~RUBY)
+      system "\#{__dir__}/k run app"
+      k_executable = File.expand_path(__FILE__)
+    RUBY
+    assert_empty messages(<<~RUBY)
+      main if __FILE__ == $0
+      main if $PROGRAM_NAME == __FILE__
+      require_relative "lib/helper"
+      puts "__FILE__"
+    RUBY
+  end
+
+  def test_flags_interrupt_rescues
+    assert_equal [
+      "Spinel does not raise `Interrupt` on Ctrl-C; trap it with `Signal.trap(\"INT\") { raise Interrupt }`.",
+      "Spinel does not raise `SignalException` on Ctrl-C; trap it with `Signal.trap(\"INT\") { raise Interrupt }`.",
+    ], messages(<<~RUBY)
+      begin
+        run
+      rescue Interrupt
+        exit
+      end
+      begin
+        run
+      rescue IOError, SignalException => e
+        exit 128 + e.signo
+      end
+    RUBY
+    assert_empty messages(<<~RUBY)
+      Signal.trap("INT") { raise Interrupt }
+      begin
+        run
+      rescue Interrupt
+        exit
+      end
+    RUBY
+    configure("InterruptRequires" => ["sigint_interrupt"])
+    assert_empty messages(<<~RUBY)
+      require "sigint_interrupt" if RUBY_ENGINE == "spinel"
+      begin
+        run
+      rescue Interrupt
+        exit
+      end
+    RUBY
+    assert_empty messages(<<~RUBY)
+      trap(:INT) { raise Interrupt }
+      def run
+        work
+      rescue SignalException
+        exit
+      end
+    RUBY
+  end
+
   private
 
   def cop_class = RuboCop::Cop::Spinel::Divergence
